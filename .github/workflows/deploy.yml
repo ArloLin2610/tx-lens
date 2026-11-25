@@ -1,0 +1,87 @@
+name: Build data and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Taipei is UTC+8. The night session closes at 05:00 and the day session at 13:45; the exchange
+    # publishes its official file late in the afternoon. GitHub often starts scheduled runs late,
+    # so each close gets more than one attempt.
+    - cron: '10 21 * * 1-5' # 05:10 Taipei, Tuesday to Saturday: night session just closed
+    - cron: '30 22 * * 1-5' # 06:30
+    - cron: '45 23 * * 1-5' # 07:45, before the day session opens
+    - cron: '55 5 * * 1-5'  # 13:55: day session just closed
+    - cron: '25 6 * * 1-5'  # 14:25, before the night session opens
+    - cron: '15 9 * * 1-5'  # 17:15: official exchange file is out
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Commits each trading day's bars (history/tx/<date>.json) back to the repository: the exchange
+    # only keeps 30 days, so this is how the history grows.
+    permissions:
+      contents: write
+      pages: read
+    outputs:
+      pages: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main # always the newest main, so snapshots committed by the previous run are present
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Build data (3-minute bars from the exchange files, Yahoo for the session just closed)
+        run: npm run data:build
+      - name: Record the new bars
+        # Committed before publishing, so the history never depends on the deploy.
+        # Pushes made with GITHUB_TOKEN do not start another workflow run.
+        run: |
+          git add history
+          if git diff --cached --quiet; then echo "No new bars."; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "data: bars as of $(date -u +%FT%H:%MZ)"
+          git push origin HEAD:main || (git pull --rebase origin main && git push origin HEAD:main)
+      - name: Build site
+        run: npm run build
+      - name: Check that GitHub Pages is turned on
+        # Pages has to be enabled once in the repository settings (Settings > Pages > Source: GitHub Actions).
+        # Until then the run still succeeds; it just does not publish.
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh api "repos/${{ github.repository }}/pages" --jq .build_type 2>/dev/null)" = "workflow" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GitHub Pages is not set to 'GitHub Actions' yet (Settings > Pages > Source). The site was built but not published."
+          fi
+      - name: Upload the site
+        if: steps.pages.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  publish:
+    needs: build
+    if: needs.build.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
