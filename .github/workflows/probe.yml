@@ -1,0 +1,20 @@
+# Manual diagnostic: can a GitHub runner reach the data sources?
+name: Probe data sources
+on: { workflow_dispatch: {} }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exchange list page and one trade file
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36'
+          curl -sS --max-time 60 -A "$UA" -o list.html -w "list http=%{http_code} size=%{size_download}B time=%{time_total}s\n" https://www.taifex.com.tw/cht/3/dlFutPrevious30DaysSalesData || echo "list failed"
+          FILE=$(grep -o 'Daily_[0-9_]*\.zip' list.html | sort -u | tail -1)
+          echo "latest file: $FILE"
+          curl -sS --max-time 120 -A "$UA" -o day.zip -w "zip http=%{http_code} size=%{size_download}B time=%{time_total}s\n" "https://www.taifex.com.tw/file/taifex/Dailydownload/DailydownloadCSV/$FILE" || echo "zip failed"
+          unzip -l day.zip | tail -2 || true
+      - name: Yahoo Taiwan minute data
+        run: |
+          curl -sS --max-time 30 -A 'Mozilla/5.0' -o y.json -w "yahoo http=%{http_code} size=%{size_download}B\n" 'https://tw.stock.yahoo.com/_td-stock/api/resource/FinanceChartService.ApacLibraCharts;symbols=%5B%22WTX%26%22%5D;type=tick?intl=tw&lang=zh-Hant-TW&region=TW&site=finance&tz=Asia%2FTaipei&returnMeta=true' || echo "yahoo failed"
+          head -c 200 y.json
